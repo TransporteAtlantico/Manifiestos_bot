@@ -9,12 +9,12 @@ app.use(express.json());
 // ===============================
 // Variables de entorno necesarias
 // ===============================
-const SHEET_ID = process.env.SHEET_ID;               // ID de tu Google Sheet
-const GS_CLIENT_EMAIL = process.env.GS_CLIENT_EMAIL; // de la cuenta de servicio
-const GS_PRIVATE_KEY = process.env.GS_PRIVATE_KEY.replace(/\\n/g, "\n");
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;   // tu API key de OpenAI
-const TWILIO_SID = process.env.TWILIO_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const SHEET_ID         = process.env.SHEET_ID || "";
+const GS_CLIENT_EMAIL  = process.env.GS_CLIENT_EMAIL || "";
+const GS_PRIVATE_KEY   = (process.env.GS_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const OPENAI_API_KEY   = process.env.OPENAI_API_KEY || "";
+const TWILIO_SID       = process.env.TWILIO_SID || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || ""
 
 // ===============================
 // Webhook de Twilio (WhatsApp)
