@@ -1,117 +1,71 @@
-// server.js
+// ===============================
+// DEPENDENCIAS
+// ===============================
 const express = require("express");
 const fetch = require("node-fetch");
 const { google } = require("googleapis");
-const twilio = require("twilio");
+// const twilio = require("twilio"); // solo si después querés usar la librería
 
 const app = express();
+
+// Middleware: Twilio envía x-www-form-urlencoded
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 // ===============================
-// Variables de entorno necesarias
+// VARIABLES DE ENTORNO (SEGURAS)
 // ===============================
-const SHEET_ID         = process.env.SHEET_ID || "";
-const GS_CLIENT_EMAIL  = process.env.GS_CLIENT_EMAIL || "";
-const GS_PRIVATE_KEY   = (process.env.GS_PRIVATE_KEY || "").replace(/\\n/g, "\n");
-const OPENAI_API_KEY   = process.env.OPENAI_API_KEY || "";
-const TWILIO_SID       = process.env.TWILIO_SID || "";
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || ""
+const SHEET_ID = process.env.SHEET_ID || "";
+const GS_CLIENT_EMAIL = process.env.GS_CLIENT_EMAIL || "";
+const GS_PRIVATE_KEY = (process.env.GS_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const TWILIO_SID = process.env.TWILIO_SID || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
 
 // ===============================
-// Webhook de Twilio (WhatsApp)
+// RUTAS DE PRUEBA
+// ===============================
+app.get("/", (_req, res) => res.send("Manifiestos Bot OK"));
+app.get("/healthz", (_req, res) => res.send("ok"));
+
+// ===============================
+// WEBHOOK WHATSAPP (Twilio)
 // ===============================
 app.post("/whatsapp-webhook", async (req, res) => {
   try {
-    const body = req.body;
+    console.log("TWILIO BODY:", req.body); // lo ves en Logs de Render
 
-    // Extraer datos de Twilio
-    const from = body.From;             // número del chofer
-    const mediaUrl = body.MediaUrl0;    // URL de la foto enviada
-    if (!mediaUrl) {
-      return res.send("<Response><Message>No recibí ninguna imagen 📷</Message></Response>");
+    const from = req.body.From;
+    const numMedia = parseInt(req.body.NumMedia || "0", 10);
+
+    if (numMedia < 1) {
+      res.type("text/xml");
+      return res.send(
+        `<Response><Message>No recibí ninguna foto 📷. Mandala como *foto normal* (no "ver una vez").</Message></Response>`
+      );
     }
 
-    // 1) Mandar la imagen a ChatGPT Vision
-    const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `De este manifiesto de transporte extrae los siguientes campos en formato JSON:
-{
- "fecha_programacion": "",
- "fecha_transporte": "",
- "generador": "",
- "domicilio_generador": "",
- "operador": "",
- "domicilio_operador": "",
- "estado": "",
- "tipo_transporte": "",
- "cantidad": "",
- "unidad": "",
- "manifiesto_n": "",
- "tipo_residuo": "Especiales|No Especiales",
- "composicion": "",
- "categoria_desecho": ""
-}`
-              },
-              { type: "image_url", image_url: mediaUrl }
-            ]
-          }
-        ]
-      })
-    }).then(r => r.json());
+    const imageUrl = req.body.MediaUrl0;
 
-    const data = JSON.parse(oaiRes.choices[0].message.content);
+    // Aquí iría tu lógica con OpenAI Vision + Google Sheets
+    // Por ahora solo hacemos eco de la URL
+    console.log("Imagen recibida:", imageUrl);
 
-    // 2) Escribir en Google Sheets
-    const auth = new google.auth.JWT(GS_CLIENT_EMAIL, null, GS_PRIVATE_KEY, [
-      "https://www.googleapis.com/auth/spreadsheets"
-    ]);
-    const sheets = google.sheets({ version: "v4", auth });
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: "Manifiestos!A:N", // A:N = 14 columnas
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          data.fecha_programacion,
-          data.fecha_transporte,
-          data.generador,
-          data.domicilio_generador,
-          data.operador,
-          data.domicilio_operador,
-          data.estado,
-          data.tipo_transporte,
-          data.cantidad,
-          data.unidad,
-          data.manifiesto_n,
-          data.tipo_residuo,
-          data.composicion,
-          data.categoria_desecho
-        ]]
-      }
-    });
-
-    // 3) Responder al chofer
-    const resp = `<Response><Message>✅ Manifiesto ${data.manifiesto_n} cargado (${data.cantidad} ${data.unidad})</Message></Response>`;
+    // Responder al chofer
     res.type("text/xml");
-    res.send(resp);
-
+    res.send(
+      `<Response><Message>✅ Recibí tu imagen. (URL: ${imageUrl})</Message></Response>`
+    );
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Error procesando el manifiesto");
+    console.error("Error en webhook:", err);
+    res.type("text/xml");
+    res.send("<Response><Message>❌ Error procesando el manifiesto</Message></Response>");
   }
 });
 
-app.listen(3000, () => console.log("Servidor escuchando en puerto 3000"));
+// ===============================
+// START SERVER
+// ===============================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Servidor en puerto", PORT));
+
