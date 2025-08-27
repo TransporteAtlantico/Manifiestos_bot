@@ -194,6 +194,18 @@ app.post("/whatsapp-webhook", async (req, res) => {
     res.send(`<Response><Message>❌ Error: ${err.message.slice(0, 140)}</Message></Response>`);
   }
 });
+const r = await fetch("https://api.openai.com/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: [{ type: "text", text: "Hola" }] }]
+  })
+});
+const data = await r.json();
 
 // ===============================
 // START SERVER (Render usa PORT)
