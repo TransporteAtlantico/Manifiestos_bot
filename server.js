@@ -1,7 +1,7 @@
 // server.js
-import express from "express";
-import fetch from "node-fetch";
-import { google } from "googleapis";
+const express = require("express");
+const fetch = require("node-fetch");
+const { google } = require("googleapis");
 
 const app = express();
 app.use(express.json());
