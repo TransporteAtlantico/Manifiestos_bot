@@ -2,7 +2,6 @@
 // DEPENDENCIAS
 // ===============================
 const express = require("express");
-const fetch = require("node-fetch");
 const { google } = require("googleapis");
 // const twilio = require("twilio"); // solo si después querés usar la librería
 
