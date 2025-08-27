@@ -1,11 +1,11 @@
 {
   "name": "manifiestos-bot",
   "version": "1.0.0",
+  "description": "WhatsApp → OpenAI Vision → Google Sheets bridge",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": "18.x" },
   "dependencies": {
-    "express": "^4.18.2",
-    "googleapis": "^126.0.1"
+    "express": "^4.18.2"
   }
 }
