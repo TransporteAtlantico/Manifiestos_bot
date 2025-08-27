@@ -1,0 +1,11 @@
+{
+  "name": "manifiestos-bot",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "googleapis": "^126.0.1"
+  }
+}
