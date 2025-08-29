@@ -3,7 +3,7 @@
 // ===============================
 const express = require("express");
 const { google } = require("googleapis");
-// const twilio = require("twilio"); // opcional, si luego querés enviar mensajes salientes
+const sharp = require("sharp"); // <— mejora de imagen
 
 const app = express();
 
@@ -14,13 +14,15 @@ app.use(express.json());
 // ===============================
 // VARIABLES DE ENTORNO (protegidas)
 // ===============================
-const SHEET_ID        = process.env.SHEET_ID || "";
-const GS_CLIENT_EMAIL = process.env.GS_CLIENT_EMAIL || "";
-const GS_PRIVATE_KEY  = (process.env.GS_PRIVATE_KEY || "").replace(/\\n/g, "\n");
-const OPENAI_API_KEY  = process.env.OPENAI_API_KEY || "";
-const OPENAI_ORG_ID   = process.env.OPENAI_ORG_ID || ""; // opcional
-const TWILIO_SID      = process.env.TWILIO_SID || "";    // para descargar MediaUrl0
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+const SHEET_ID           = process.env.SHEET_ID || "";
+const GS_CLIENT_EMAIL    = process.env.GS_CLIENT_EMAIL || "";
+const GS_PRIVATE_KEY     = (process.env.GS_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const OPENAI_API_KEY     = process.env.OPENAI_API_KEY || "";
+const OPENAI_ORG_ID      = process.env.OPENAI_ORG_ID || ""; // opcional
+const TWILIO_SID         = process.env.TWILIO_SID || "";    // para descargar MediaUrl0
+const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN || "";
+const SHEET_RANGE        = process.env.SHEET_RANGE || "'Manifiestos'!A:N"; // <— configurable
+const OPENAI_MODEL       = process.env.OPENAI_MODEL || "gpt-4o"; // mejor precisión
 
 // ===============================
 // RUTAS DE PRUEBA
@@ -31,16 +33,12 @@ app.get("/healthz", (_req, res) => res.send("ok"));
 // Diagnóstico OpenAI (texto)
 app.get("/test-openai", async (_req, res) => {
   try {
-    const extraHeaders = OPENAI_ORG_ID ? { "OpenAI-Organization": OPENAI_ORG_ID } : {};
+    const extra = OPENAI_ORG_ID ? { "OpenAI-Organization": OPENAI_ORG_ID } : {};
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        ...extraHeaders
-      },
+      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json", ...extra },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: OPENAI_MODEL,
         temperature: 0,
         messages: [{ role: "user", content: [{ type: "text", text: "decí 'ok' si me escuchás" }] }]
       })
@@ -55,16 +53,12 @@ app.get("/test-openai", async (_req, res) => {
 // Diagnóstico OpenAI (status y preview)
 app.get("/diag/openai", async (_req, res) => {
   try {
-    const extraHeaders = OPENAI_ORG_ID ? { "OpenAI-Organization": OPENAI_ORG_ID } : {};
+    const extra = OPENAI_ORG_ID ? { "OpenAI-Organization": OPENAI_ORG_ID } : {};
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        ...extraHeaders
-      },
+      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json", ...extra },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: OPENAI_MODEL,
         temperature: 0,
         messages: [{ role: "user", content: [{ type: "text", text: "ping" }] }]
       })
@@ -108,18 +102,19 @@ async function appendRowToSheet(values) {
     ["https://www.googleapis.com/auth/spreadsheets"]
   );
   const sheets = google.sheets({ version: "v4", auth });
+
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
-    range: "Manifiestos!A:N", // 14 columnas (A..N)
+    range: SHEET_RANGE, // <— usar env var
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [values] }
   });
 }
 
 // ===============================
-// HELPERS: Twilio media → Data URL
+// HELPERS: Preprocesar imagen Twilio → Data URL
 // ===============================
-async function fetchTwilioImageAsDataUrl(mediaUrl, contentTypeHint = "image/jpeg") {
+async function downloadAndEnhanceTwilioImageAsDataUrl(mediaUrl) {
   if (!TWILIO_SID || !TWILIO_AUTH_TOKEN) {
     throw new Error("Faltan TWILIO_SID/TWILIO_AUTH_TOKEN para leer MediaUrl de Twilio.");
   }
@@ -132,178 +127,33 @@ async function fetchTwilioImageAsDataUrl(mediaUrl, contentTypeHint = "image/jpeg
     const txt = await r.text().catch(() => "");
     throw new Error(`No pude descargar la imagen de Twilio (${r.status}): ${txt}`);
   }
-  const buf = await r.arrayBuffer();
-  const b64 = Buffer.from(buf).toString("base64");
-  return `data:${contentTypeHint};base64,${b64}`;
+  const original = Buffer.from(await r.arrayBuffer());
+
+  // 🔧 Preprocesado: EXIF rotate, grayscale, normalize, sharpen, resize y PNG
+  const processed = await sharp(original)
+    .rotate()
+    .grayscale()
+    .normalize()
+    .sharpen()
+    .resize({ width: 1600, withoutEnlargement: false })
+    .toFormat("png", { compressionLevel: 9 })
+    .toBuffer();
+
+  return `data:image/png;base64,${processed.toString("base64")}`;
 }
 
 // ===============================
 // HELPERS: OpenAI (reintentos + visión)
 // ===============================
 async function callOpenAIWithRetry(payload, maxRetries = 3) {
-  const extraHeaders = OPENAI_ORG_ID ? { "OpenAI-Organization": OPENAI_ORG_ID } : {};
+  const extra = OPENAI_ORG_ID ? { "OpenAI-Organization": OPENAI_ORG_ID } : {};
   let lastErr;
   for (let i = 0; i <= maxRetries; i++) {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        ...extraHeaders
-      },
+      headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json", ...extra },
       body: JSON.stringify(payload)
     });
     if (r.ok) return r.json();
     const status = r.status;
     const body = await r.text().catch(() => "");
-    if ((status === 429 || status === 503) && i < maxRetries) {
-      const waitMs = 1000 * Math.pow(2, i); // 1s, 2s, 4s
-      await new Promise(res => setTimeout(res, waitMs));
-      continue;
-    }
-    lastErr = new Error(`OpenAI HTTP ${status}: ${body}`);
-    break;
-  }
-  throw lastErr || new Error("OpenAI: error desconocido");
-}
-
-async function extractFieldsFromDataUrl(dataUrl) {
-  if (!OPENAI_API_KEY) throw new Error("Falta OPENAI_API_KEY");
-
-  const prompt = `
-Extrae de la imagen del manifiesto estos 14 campos y devolvé SOLO un JSON válido (sin comentarios):
-{
- "fecha_programacion": "",
- "fecha_transporte": "",
- "generador": "",
- "domicilio_generador": "",
- "operador": "",
- "domicilio_operador": "",
- "estado": "",
- "tipo_transporte": "",
- "cantidad": "",
- "unidad": "",
- "manifiesto_n": "",
- "tipo_residuo": "Especiales|No Especiales",
- "composicion": "",
- "categoria_desecho": ""
-}
-- Normalizá fechas a YYYY-MM-DD si es posible; si no, dejá el formato tal cual se ve.
-- Si un dato no se ve, dejá "".
-- No pongas nada fuera del JSON.
-`;
-
-  const payload = {
-    model: "gpt-4o-mini",
-    temperature: 0,
-    messages: [{
-      role: "user",
-      content: [
-        { type: "text", text: prompt },
-        // OJO: image_url DEBE ser un objeto con { url }
-        { type: "image_url", image_url: { url: dataUrl } }
-      ]
-    }]
-  };
-
-  const data = await callOpenAIWithRetry(payload);
-  const content = data?.choices?.[0]?.message?.content || "{}";
-
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    const m = content.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error("No se pudo parsear JSON devuelto por OpenAI.");
-    parsed = JSON.parse(m[0]);
-  }
-
-  return {
-    fecha_programacion:   parsed.fecha_programacion   ?? "",
-    fecha_transporte:     parsed.fecha_transporte     ?? "",
-    generador:            parsed.generador            ?? "",
-    domicilio_generador:  parsed.domicilio_generador  ?? "",
-    operador:             parsed.operador             ?? "",
-    domicilio_operador:   parsed.domicilio_operador   ?? "",
-    estado:               parsed.estado               ?? "",
-    tipo_transporte:      parsed.tipo_transporte      ?? "",
-    cantidad:             parsed.cantidad             ?? "",
-    unidad:               parsed.unidad               ?? "",
-    manifiesto_n:         parsed.manifiesto_n         ?? "",
-    tipo_residuo:         parsed.tipo_residuo         ?? "",
-    composicion:          parsed.composicion          ?? "",
-    categoria_desecho:    parsed.categoria_desecho    ?? ""
-  };
-}
-
-// ===============================
-// WEBHOOK DE TWILIO (WhatsApp)
-// ===============================
-// Si querés validar la firma de Twilio, podrías usar:
-// app.post("/whatsapp-webhook", twilio.webhook({ validate: true }), async (req, res) => { ... });
-
-app.post("/whatsapp-webhook", async (req, res) => {
-  try {
-    console.log("TWILIO BODY:", req.body);
-
-    const from = req.body.From;
-    const numMedia = parseInt(req.body.NumMedia || "0", 10);
-    if (!from) {
-      res.type("text/xml");
-      return res.send(`<Response><Message>No reconozco el remitente.</Message></Response>`);
-    }
-    if (numMedia < 1) {
-      res.type("text/xml");
-      return res.send(`<Response><Message>No recibí imagen. Enviá *foto normal* (no "ver una vez" ni "Documento").</Message></Response>`);
-    }
-
-    const imageUrl   = req.body.MediaUrl0;
-    const contentType = req.body.MediaContentType0 || "image/jpeg";
-
-    // 1) Descargar imagen de Twilio (privada) → data URL
-    const dataUrl = await fetchTwilioImageAsDataUrl(imageUrl, contentType);
-
-    // 2) OpenAI visión → JSON con 14 campos
-    const f = await extractFieldsFromDataUrl(dataUrl);
-
-    // 3) Aplanar la fila (14 columnas exactas)
-    const row = [
-      f.fecha_programacion,   // 1
-      f.fecha_transporte,     // 2
-      f.generador,            // 3
-      f.domicilio_generador,  // 4
-      f.operador,             // 5
-      f.domicilio_operador,   // 6
-      f.estado,               // 7
-      f.tipo_transporte,      // 8
-      f.cantidad,             // 9
-      f.unidad,               // 10
-      f.manifiesto_n,         // 11
-      f.tipo_residuo,         // 12
-      f.composicion,          // 13
-      f.categoria_desecho     // 14
-    ];
-
-    // 4) Guardar en Google Sheets
-    await appendRowToSheet(row);
-
-    // 5) Responder al chofer
-    res.type("text/xml");
-    res.send(
-      `<Response><Message>✅ Cargado Manif. ${f.manifiesto_n} | ${f.cantidad} ${f.unidad}</Message></Response>`
-    );
-  } catch (e) {
-    console.error("Error webhook:", e);
-    const msg =
-      /OpenAI HTTP 429/.test(String(e)) ?
-        "Estamos al tope de uso de IA unos minutos. Intentá reenviar la foto más tarde." :
-        String(e).slice(0, 140);
-    res.type("text/xml").send(`<Response><Message>❌ Error: ${msg}</Message></Response>`);
-  }
-});
-
-// ===============================
-// START SERVER (Heroku asigna PORT)
-// ===============================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Servidor en puerto", PORT));
