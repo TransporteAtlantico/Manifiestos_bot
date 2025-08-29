@@ -7,6 +7,7 @@
   "engines": { "node": "18.x" },
   "dependencies": {
     "express": "^4.18.2",
-    "googleapis": "^126.0.1"
+    "googleapis": "^126.0.1",
+    "sharp": "^0.33.3"
   }
 }
