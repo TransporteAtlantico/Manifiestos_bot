@@ -157,3 +157,199 @@ async function callOpenAIWithRetry(payload, maxRetries = 3) {
     if (r.ok) return r.json();
     const status = r.status;
     const body = await r.text().catch(() => "");
+    if ((status === 429 || status === 503) && i < maxRetries) {
+      await new Promise(res => setTimeout(res, 1000 * Math.pow(2, i))); // 1s,2s,4s
+      continue;
+    }
+    lastErr = new Error(`OpenAI HTTP ${status}: ${body}`);
+    break;
+  }
+  throw lastErr || new Error("OpenAI: error desconocido");
+}
+
+// ===============================
+// Limpieza/normalización de campos
+// ===============================
+function cleanValue(s) {
+  if (s == null) return "";
+  return String(s).replace(/\s+/g, " ").trim();
+}
+
+function normalizeFields(parsed) {
+  const f = {
+    fecha_programacion:  cleanValue(parsed.fecha_programacion),
+    fecha_transporte:    cleanValue(parsed.fecha_transporte),
+    generador:           cleanValue(parsed.generador),
+    domicilio_generador: cleanValue(parsed.domicilio_generador),
+    operador:            cleanValue(parsed.operador),
+    domicilio_operador:  cleanValue(parsed.domicilio_operador),
+    estado:              cleanValue(parsed.estado),
+    tipo_transporte:     cleanValue(parsed.tipo_transporte),
+    cantidad:            cleanValue(parsed.cantidad),
+    unidad:              cleanValue(parsed.unidad),
+    manifiesto_n:        cleanValue(parsed.manifiesto_n),
+    tipo_residuo:        cleanValue(parsed.tipo_residuo),
+    composicion:         cleanValue(parsed.composicion),
+    categoria_desecho:   cleanValue(parsed.categoria_desecho)
+  };
+
+  // Tipo de residuo a valores válidos
+  const tr = f.tipo_residuo.toLowerCase();
+  if (/no\s*esp(eciales)?/.test(tr)) f.tipo_residuo = "No Especiales";
+  else if (/esp(eciales)?/.test(tr)) f.tipo_residuo = "Especiales";
+  else f.tipo_residuo = f.tipo_residuo || "";
+
+  // Cantidad: coma→punto y solo numérico
+  if (f.cantidad) {
+    const c = f.cantidad.replace(",", ".").match(/[0-9]+(\.[0-9]+)?/);
+    f.cantidad = c ? c[0] : "";
+  }
+
+  // Unidad: normalizar
+  const u = f.unidad.toLowerCase();
+  if (/kilos?|kg/.test(u)) f.unidad = "kg";
+  else if (/ton|tn|t(?![a-z])/.test(u)) f.unidad = "tn";
+  else if (/m3|metro.*c(ú|u)bico/.test(u)) f.unidad = "m3";
+  else if (/^l$|litro/.test(u)) f.unidad = "L";
+
+  // Fechas DD/MM/AAAA → YYYY-MM-DD
+  function normFecha(s) {
+    const m = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/);
+    if (m) {
+      const d = m[1].padStart(2, "0");
+      const mo = m[2].padStart(2, "0");
+      const y = m[3].length === 2 ? ("20" + m[3]) : m[3];
+      return `${y}-${mo}-${d}`;
+    }
+    return s;
+  }
+  f.fecha_programacion = normFecha(f.fecha_programacion);
+  f.fecha_transporte   = normFecha(f.fecha_transporte);
+
+  return f;
+}
+
+// ===============================
+// Extracción con OpenAI (visión)
+// ===============================
+async function extractFieldsFromDataUrl(dataUrl) {
+  if (!OPENAI_API_KEY) throw new Error("Falta OPENAI_API_KEY");
+
+  const prompt = `
+Extraé de la imagen del MANIFIESTO estos 14 campos EXACTOS y devolvé SOLO un JSON válido:
+{
+ "fecha_programacion": "",
+ "fecha_transporte": "",
+ "generador": "",
+ "domicilio_generador": "",
+ "operador": "",
+ "domicilio_operador": "",
+ "estado": "",
+ "tipo_transporte": "",
+ "cantidad": "",
+ "unidad": "",
+ "manifiesto_n": "",
+ "tipo_residuo": "Especiales|No Especiales",
+ "composicion": "",
+ "categoria_desecho": ""
+}
+Reglas:
+- NO inventes. Si no se ve claro, dejá "".
+- Normalizá fechas a YYYY-MM-DD si es posible; si está incompleta, dejala tal cual.
+- "tipo_residuo" debe ser "Especiales" o "No Especiales".
+- "cantidad" sólo números (coma → punto) y "unidad" en kg/tn/m3/L si se deduce.
+- Considerá secciones: Generador (origen), Operador, Residuos, Transportista.
+`;
+
+  const payload = {
+    model: OPENAI_MODEL,
+    temperature: 0,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: prompt },
+        { type: "image_url", image_url: { url: dataUrl } } // ← objeto { url }
+      ]
+    }]
+  };
+
+  const data = await callOpenAIWithRetry(payload);
+  const content = data?.choices?.[0]?.message?.content || "{}";
+
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    const m = content.match(/\{[\s\S]*\}/);
+    if (!m) throw new Error("No se pudo parsear JSON devuelto por OpenAI.");
+    parsed = JSON.parse(m[0]);
+  }
+
+  return normalizeFields(parsed);
+}
+
+// ===============================
+// WEBHOOK DE TWILIO (WhatsApp)
+// ===============================
+app.post("/whatsapp-webhook", async (req, res) => {
+  try {
+    console.log("TWILIO BODY:", req.body);
+
+    const from = req.body.From;
+    const numMedia = parseInt(req.body.NumMedia || "0", 10);
+    if (!from) {
+      res.type("text/xml");
+      return res.send(`<Response><Message>No reconozco el remitente.</Message></Response>`);
+    }
+    if (numMedia < 1) {
+      res.type("text/xml");
+      return res.send(`<Response><Message>No recibí imagen. Enviá *foto normal* (no "ver una vez" ni "Documento").</Message></Response>`);
+    }
+
+    const imageUrl = req.body.MediaUrl0;
+
+    // 1) Descargar + mejorar imagen → data URL
+    const dataUrl = await downloadAndEnhanceTwilioImageAsDataUrl(imageUrl);
+
+    // 2) OpenAI (visión) → JSON con 14 campos
+    const f = await extractFieldsFromDataUrl(dataUrl);
+
+    // 3) Aplanar la fila (14 columnas exactas)
+    const row = [
+      f.fecha_programacion,   // 1
+      f.fecha_transporte,     // 2
+      f.generador,            // 3
+      f.domicilio_generador,  // 4
+      f.operador,             // 5
+      f.domicilio_operador,   // 6
+      f.estado,               // 7
+      f.tipo_transporte,      // 8
+      f.cantidad,             // 9
+      f.unidad,               // 10
+      f.manifiesto_n,         // 11
+      f.tipo_residuo,         // 12
+      f.composicion,          // 13
+      f.categoria_desecho     // 14
+    ];
+
+    // 4) Guardar en Google Sheets
+    await appendRowToSheet(row);
+
+    // 5) Responder
+    res.type("text/xml");
+    res.send(`<Response><Message>✅ Cargado Manif. ${f.manifiesto_n} | ${f.cantidad} ${f.unidad}</Message></Response>`);
+  } catch (e) {
+    console.error("Error webhook:", e);
+    const msg =
+      /OpenAI HTTP 429/.test(String(e)) ?
+      "Estamos al tope de uso de IA unos minutos. Intentá reenviar la foto más tarde." :
+      String(e).slice(0, 160);
+    res.type("text/xml").send(`<Response><Message>❌ Error: ${msg}</Message></Response>`);
+  }
+});
+
+// ===============================
+// START SERVER (Heroku asigna PORT)
+// ===============================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Servidor en puerto", PORT));
